@@ -24,6 +24,10 @@ class Settings(BaseSettings):
     chroma_presist_dir:str = "./data/chroma-db"
     chroma_collection_name: str ="policies"
 
+    # retrival
+    retriver_top_k:int=6
+    use_bm25:bool = False
+
     # chunking
     chunk_size:int=100
     chunk_overlap:int = 200
