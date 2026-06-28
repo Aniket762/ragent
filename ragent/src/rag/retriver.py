@@ -24,20 +24,20 @@ class BM25Retriever(BaseRetriever):
         top_indices = sorted(range(len(scores)), key=lambda i: scores[i],reverse=True)[:self.k] # top k 
         return [self.documents[i] for i in top_indices]
     
-    def build_retriever(corpus: list[Document] | None=None)->BaseRetriever:
-        '''
-        return a hybrid retriever when use_bm25 is true + corpus provided
-        fallsback to pure semantic search
+def build_retriever(corpus: list[Document] | None=None)->BaseRetriever:
+    '''
+    return a hybrid retriever when use_bm25 is true + corpus provided
+    fallsback to pure semantic search
 
-        hybrid wt: 60% semantic + 40% bm 25
-        '''
-        semantic = get_base_retriever()
+    hybrid wt: 60% semantic + 40% bm 25
+    '''
+    semantic = get_base_retriever()
 
-        if not settings.use_bm25 or not corpus:
-            return semantic
+    if not settings.use_bm25 or not corpus:
+        return semantic
         
-        bm25 = BM25Retriever(documents=corpus, k=settings.retriver_top_k)
-        return EnsembleRetriever(
-            retrievers= [semantic,bm25],
-            weights=[0.6,0.4]
-        )
+    bm25 = BM25Retriever(documents=corpus, k=settings.retriver_top_k)
+    return EnsembleRetriever(
+        retrievers= [semantic,bm25],
+        weights=[0.6,0.4]
+    )

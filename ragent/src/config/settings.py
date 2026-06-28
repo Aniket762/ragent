@@ -11,7 +11,7 @@ class Settings(BaseSettings):
 
     # llm
     anthropic_api_key:str = ""
-    llm_mode:str= "claude-opus-4-8"
+    llm_model:str= "claude-opus-4-8"
     llm_max_tokens:int = 4096
     llm_temperature:float=0.1
 
