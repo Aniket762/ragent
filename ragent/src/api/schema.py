@@ -69,3 +69,32 @@ class StreamChunk(BaseModel):
         None,
         description="only present on final event."
     )
+
+class IngestRequest(BaseModel):
+    '''
+    req body for post /ingest
+    '''
+    directory:str = Field(
+        "data/polices",
+        description="path to directory containing policy files"
+    )
+    clear:bool = Field(
+        False,
+        description="delete all existing vectors before ingesting"
+    )
+
+class IngestResponse(BaseModel):
+    status: str
+    message: str 
+
+class HealthResponse(BaseModel):
+    status:str = "ok"
+
+class StatusResponse(BaseModel):
+    status: str # "ok"|"degraded"
+    llm_model: str
+    embedding_provider: str
+    embedding_model: str
+    vector_store_path: str
+    document_count: int|None # vector store unreachable
+    langsmith_enabled: bool 
