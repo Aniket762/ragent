@@ -23,7 +23,7 @@ def _get_router_llm():
         max_tokens=256,
         temperature=0.0,
         anthropic_api_key= settings.anthropic_api_key
-    ).with_structured_output(RouterDecision)
+    ).with_structured_output(RouterDecision) 
 
 _ROUTER_SYSTEM_PROMPT=""
 
