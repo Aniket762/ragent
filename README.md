@@ -1,32 +1,72 @@
-# ragent
+<div align="center">
 
-> Guardrail-first policy assistant with frustration-aware escalation. A multi-turn conversational agent built on LangGraph, with LLM-based intent routing, hybrid retrieval, and a regex-driven escalation model.
+# 🧠 ragent
 
-## 1. Purpose & Problem Statement
+### *A guardrail-first policy assistant that knows when to give up and call a human* 🙋‍♂️
 
-`ragent` answers employee questions about internal policy documents (HR policy, expense policy, leave policy, etc.) using retrieval-augmented generation, while treating two failure modes as first-class design concerns rather than afterthoughts:
+*Multi-turn LangGraph agent · hybrid RAG · frustration-aware escalation · async ingestion pipeline*
 
-1. **Hallucination / ungrounded answers** — mitigated with input/output guardrails and a lexical grounding check, plus an offline LLM-judge and RAGAS evaluation harness.
-2. **User frustration in multi-turn conversations** — tracked as a cumulative, session-scoped score and used to trigger automatic human escalation, rather than relying on the LLM to "notice" frustration.
+![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-async-009688?logo=fastapi&logoColor=white)
+![LangGraph](https://img.shields.io/badge/LangGraph-state%20machine-1C3C3C?logo=langchain&logoColor=white)
+![Claude](https://img.shields.io/badge/LLM-Claude-D97757?logo=anthropic&logoColor=white)
+![Chroma](https://img.shields.io/badge/VectorDB-Chroma-FF6F00)
+![Celery](https://img.shields.io/badge/Queue-Celery%20%2B%20Redis-37814A?logo=celery&logoColor=white)
+![License](https://img.shields.io/badge/license-MIT-lightgrey)
 
-The system is exposed three ways from the same core agent graph:
-- A **FastAPI** service (`/api/v1/ask`, `/api/v1/ask/stream`, `/api/v1/ingest`, `/api/v1/health`, `/api/v1/status`)
-- An **MCP server** (`src/mcp_server.py`) exposing `search_policies` and `list_policy_documents` as tools for external LLM clients
-- A **direct Python API** (`ask`, `ask_with_session`) for embedding the agent in other services
+</div>
 
 ---
 
-## 2. High-Level Architecture
+## 👋 What even is this thing?
+
+`ragent` answers "what does the policy say about X?" questions over your own PDFs/DOCX policy docs — but it's built around two questions most weekend-project RAG bots don't bother asking:
+
+1. 🧯 **"Is the model actually making this up?"** → input/output guardrails + a lexical grounding check + an LLM judge + RAGAS, so hallucinations get caught instead of shipped.
+2. 😤 **"Is the user about to lose their mind?"** → a cumulative, regex-scored frustration meter that auto-escalates to a human the moment things cross a threshold — no vibes-based LLM judgment call required.
+
+It's exposed three ways off the *same* agent graph:
+
+| Surface | Use it for |
+|---|---|
+| 🌐 **FastAPI** (`/api/v1/ask`, `/ask/stream`, `/ingest`) | Talking to it over HTTP, streaming tokens via SSE |
+| 🔌 **MCP server** (`src/mcp_server.py`) | Plugging policy search into Claude Desktop or any MCP client |
+| 🐍 **Direct Python** (`ask()`, `ask_with_session()`) | Embedding the agent straight into another service |
+
+Built as a personal deep-dive into LangGraph state machines, hybrid retrieval, and "what does production-grade actually require" — so expect a few 🚧 rough edges alongside the parts that are genuinely solid.
+
+---
+
+## 🗺️ Table of Contents
+
+- [🏗️ Architecture](#️-architecture)
+- [🔁 Diagram Zoo (learning reference)](#-diagram-zoo-learning-reference)
+  - [Request lifecycle — sync `/ask`](#1-request-lifecycle--sync-ask)
+  - [Async ingestion via Celery + Redis](#2-async-ingestion-via-celery--redis)
+  - [Frustration score state machine](#3-frustration-score-state-machine)
+  - [Middleware pipeline](#4-middleware-pipeline)
+- [🧰 Tech Stack & Why](#-tech-stack--why)
+- [💡 Core Design Decisions](#-core-design-decisions)
+- [📁 Module Map](#-module-map)
+- [⚙️ Configuration Reference](#️-configuration-reference)
+
+---
+
+## 🏗️ Architecture
 
 ```mermaid
 flowchart TB
-    subgraph Clients["Entry Points"]
-        A1["FastAPI /ask, /ask/stream"]
+    subgraph Clients["🚪 Entry Points"]
+        A1["FastAPI\n/ask, /ask/stream"]
         A2["MCP Server (stdio)\nsearch_policies / list_policy_documents"]
         A3["Direct Python API\nask() / ask_with_session()"]
     end
 
-    subgraph Core["Master Agent (LangGraph StateGraph)"]
+    subgraph MW["🛡️ HTTP Middleware Stack"]
+        RID["RequestID"] --> RL["RateLimit\n(sliding window / IP)"] --> CORS["CORS"] --> LOG["Structured JSON logging"]
+    end
+
+    subgraph Core["🧠 Master Agent — LangGraph StateGraph"]
         direction TB
         IG["input_guard\nPII + prompt-injection filter"]
         FC["frustration_check\nregex signal scan + score update"]
@@ -34,34 +74,33 @@ flowchart TB
         PA["policy_agent (sub-graph)"]
         OOS["out_of_scope_handler"]
         OG["output_guard\nPII redaction + grounding check"]
-        HE["human_escalation\nticket stub"]
+        HE["human_escalation 🆘\nticket stub"]
     end
 
-    subgraph SubGraph["policy_agent sub-graph"]
+    subgraph SubGraph["📚 policy_agent sub-graph"]
         direction TB
-        TQ["transform_query"] --> RD["retrieve\n(vector / hybrid retriever)"] --> GN["generate\n(ChatAnthropic)"]
+        TQ["transform_query"] --> RD["retrieve"] --> GN["generate\n(ChatAnthropic)"]
     end
 
-    subgraph RAGLayer["RAG Layer"]
-        VS[("Chroma\npersistent vector store")]
-        EMB["Embeddings\nHuggingFace BGE (local) or OpenAI"]
-        BM["BM25Retriever\nin-memory keyword search"]
+    subgraph RAGLayer["🔍 RAG Layer"]
+        VS[("Chroma\npersistent + singleton")]
+        EMB["Embeddings\nHF BGE (local) or OpenAI"]
+        BM["BM25Retriever\nkeyword search"]
         ENS["EnsembleRetriever\n0.6 semantic / 0.4 BM25"]
     end
 
-    subgraph Ingestion["Ingestion Pipeline"]
-        DOC["UnstructuredFileLoader\n(PDF / DOCX)"]
-        SPLIT["RecursiveCharacterTextSplitter"]
-        META["Metadata enrichment\n(policy_name from filename)"]
+    subgraph AsyncPipe["⚙️ Async Ingestion Pipeline"]
+        REDIS[("Redis\nbroker + result backend")]
+        WORKER["Celery worker\nload → chunk → embed → store"]
     end
 
-    A1 --> IG
+    A1 --> MW --> IG
     A3 --> IG
-    A2 -.direct retriever call, bypasses guardrails.-> ENS
+    A2 -.direct retriever call, skips guardrails.-> ENS
 
-    IG -->|error| END1(["END"])
+    IG -->|blocked| END1(["END"])
     IG --> FC
-    FC -->|score >= 0.80| HE
+    FC -->|score ≥ 0.80| HE
     FC -->|below threshold| RT
     RT -->|intent=policy| PA
     RT -->|intent=out_of_scope| OOS
@@ -70,25 +109,31 @@ flowchart TB
     HE --> END2
 
     PA -.contains.-> SubGraph
-    RD --> ENS
-    ENS --> VS
+    RD --> ENS --> VS
     ENS --> BM
     VS --> EMB
 
-    DOC --> SPLIT --> META --> VS
+    A1 -."POST /ingest".-> REDIS --> WORKER --> VS
 
-    MemorySaver[("MemorySaver\ncheckpointer, keyed by session_id")]
-    Core -. persists frustration_score,\nescalation_requested across turns .- MemorySaver
+    CKPT[("SqliteSaver\n(fallback: MemorySaver)")]
+    Core -. persists frustration_score,\nescalation_requested, per session_id .- CKPT
 ```
+
 
 ---
 
-## 3. Request Lifecycle (single turn, synchronous `/ask`)
+## 🔁 Design Zoo
+
+A handful of extra diagrams purely so future-me (or anyone poking around this repo) can see *how* each moving part behaves, not just that it exists.
+
+### 1. Request lifecycle — sync `/ask`
 
 ```mermaid
 sequenceDiagram
     participant C as Client
+    participant MW as Middleware
     participant API as FastAPI route
+    participant SEM as asyncio.Semaphore
     participant G as master_agent (LangGraph)
     participant IG as input_guard
     participant FR as frustration_check
@@ -98,9 +143,11 @@ sequenceDiagram
     participant LLM as ChatAnthropic
     participant OG as output_guard
 
-    C->>API: POST /ask {query, session_id?}
-    API->>API: session_id = req.session_id or uuid4()
-    API->>G: ainvoke(turn_input, thread_id=session_id)
+    C->>MW: POST /ask {query, session_id?}
+    MW->>MW: assign request_id, check rate limit
+    MW->>API: forward request
+    API->>SEM: acquire (max_concurrent_llm_calls)
+    API->>G: ainvoke(turn_input, thread_id=session_id)\nwrapped in asyncio.wait_for(timeout)
     G->>IG: check_input(state)
     alt PII or injection detected
         IG-->>G: error + canned final_response
@@ -108,9 +155,9 @@ sequenceDiagram
     else clean
         IG-->>G: sanitized_query
         G->>FR: detect_frustration_signals + update score
-        alt score >= 0.80
+        alt score ≥ 0.80
             FR-->>G: escalation_requested
-            G->>G: human_escalation_node
+            G->>G: human_escalation_node 🆘
             G-->>API: ticket-reference message
         else
             FR-->>G: continue
@@ -124,7 +171,6 @@ sequenceDiagram
                 LLM-->>PA: generated_response
                 PA-->>G: state update
                 G->>OG: check_output(state)
-                OG->>OG: redact PII, grounding heuristic
                 OG-->>G: final_response + guardrail_flags
             else out_of_scope
                 G->>G: out_of_scope_handler_node
@@ -132,168 +178,242 @@ sequenceDiagram
             G-->>API: AskResponse
         end
     end
+    API->>SEM: release
     API-->>C: {response, guardrail_flags, sources?, session_id}
 ```
 
-The **streaming** variant (`/ask/stream`) runs the identical graph but consumes `master_agent.astream_events(..., version="v2")`, filters for `on_chat_model_stream` events scoped to the `generate` LangGraph node (so router/judge token noise is not leaked to the client), and emits Server-Sent Events. A final `done: true` event carries `guardrail_flags`, `sources`, and `session_id`.
+The **streaming** twin (`/ask/stream`) runs the identical graph via `astream_events(..., version="v2")`, filters for `on_chat_model_stream` events scoped to the `generate` node only (so router/judge tokens never leak to the client), and emits SSE with a final `done: true` frame.
+
+### 2. Async ingestion via Celery + Redis
+
+Swapped `BackgroundTasks` for a real queue. 🎉
+
+```mermaid
+sequenceDiagram
+    participant U as You
+    participant API as POST /ingest
+    participant R as Redis (broker)
+    participant W as Celery worker
+    participant VS as Chroma
+
+    U->>API: {"directory": "data/policies", "clear": false}
+    API->>R: ingest_documents.delay(dir, clear)
+    R-->>API: task_id
+    API-->>U: 202 Accepted {task_id, status: "queued"}
+
+    Note over W,R: worker polls Redis, picks up the task
+
+    R->>W: dequeue ingest_documents
+    W->>W: update_state(step="clearing", pct=0)
+    opt clear=true
+        W->>VS: delete_collection()
+    end
+    W->>W: update_state(step="loading", pct=20)
+    W->>W: load_directory() → chunk with RecursiveCharacterTextSplitter
+    W->>W: update_state(step="embedding", pct=50)
+    W->>VS: add_documents(chunks)
+    W->>W: update_state(step="done", pct=100)
+    W-->>R: result {chunks_written, cleared}
+
+    U->>API: GET /ingest/status/{task_id}
+    API->>R: AsyncResult(task_id).state / .info
+    R-->>API: {state, pct, step, chunks_written}
+    API-->>U: IngestStatusResponse
+```
+
+**Why this over `BackgroundTasks`:** crash-safe redelivery (`task_acks_late=True`), automatic retry with exponential backoff on transient I/O errors, real progress percentages instead of "check the logs," and the ability to add more worker processes without touching the API process at all.
+
+### 3. Frustration score state machine
+
+The escalation logic, drawn as what it actually is — a one-way ratchet with a trapdoor. 😅
+
+```mermaid
+stateDiagram-v2
+    [*] --> Calm: session starts (score = 0.0)
+    Calm --> Mildly_Annoyed: score += weight\n(e.g. "that's wrong" = +0.15)
+    Mildly_Annoyed --> Frustrated: score += weight\n(e.g. "this is ridiculous" = +0.30)
+    Frustrated --> Escalated: score ≥ 0.80 🆘
+    Mildly_Annoyed --> Calm: no new signals\n(score never decreases,\nbut also never auto-cools)
+    Calm --> Escalated: single strong signal\n(e.g. "connect me to a human" = +0.40,\ncan combine with prior turns)
+    Escalated --> [*]: human_escalation_node\nticket issued, graph ends turn
+
+    note right of Escalated
+        Score is cumulative across the
+        whole session (persisted via
+        SqliteSaver, keyed by session_id).
+        It only ever goes up within a turn —
+        there's no decay mechanism today.
+    end note
+```
+
+### 4. Middleware pipeline
+
+Every request runs this gauntlet before it ever touches the agent graph:
+
+```mermaid
+flowchart LR
+    Req(["Incoming request"]) --> RID["🏷️ RequestIDMiddleware\nassigns/echoes X-Request-ID"]
+    RID --> RLM["🚦 RateLimitMiddleware\nsliding window per client IP"]
+    RLM -->|"limit exceeded"| R429(["429 + Retry-After"])
+    RLM -->|"under limit"| CORS["🌍 CORSMiddleware"]
+    CORS --> TIME["⏱️ Request timing log\nmethod, path, status, duration_ms"]
+    TIME --> ROUTE["Route handler\n(/ask, /ingest, /health...)"]
+    ROUTE --> JSONLOG["📋 JSONLogFormatter\nstructured stdout for log aggregators"]
+```
+
+### 5. Concurrency control — the semaphore dance
+
+Per-worker throttling so one uvicorn process doesn't fire 200 concurrent LLM calls at Anthropic:
+
+```mermaid
+flowchart TB
+    subgraph Worker["Single uvicorn worker process"]
+        SEM["asyncio.Semaphore(max_concurrent_llm_calls)"]
+        R1["Request A"] -->|acquire| SEM
+        R2["Request B"] -->|acquire| SEM
+        R3["Request C"] -.waits.-> SEM
+        SEM --> LLMCall["ChatAnthropic.ainvoke()"]
+    end
+    Note["Total concurrency across the fleet =\nmax_concurrent_llm_calls × num_workers\n(the semaphore is per-process, not global)"]
+```
 
 ---
 
-## 4. Tech Stack & Rationale
+## 🧰 Tech Stack & Why
 
-| Layer | Choice | Why |
+| Layer | Choice | Why 🤔 |
 |---|---|---|
-| **Orchestration** | LangGraph (`StateGraph`) | Explicit, inspectable state machine over implicit agent loops. Conditional edges make routing/escalation logic testable as pure functions (`_route_after_*`) independent of LLM calls. |
-| **LLM** | Anthropic Claude via `langchain-anthropic` | Single-provider `ChatAnthropic` client reused across generation, routing, scope detection, and judging — swappable per-node by model name (comment in `master_agent.py` notes intent to swap a cheaper model in for routing). |
-| **Web framework** | FastAPI + Uvicorn | Native `async`/`await` matches LangGraph's async invocation path; built-in OpenAPI docs (`/docs`); first-class SSE support via `StreamingResponse` for token streaming. |
-| **Vector store** | Chroma (`langchain-chroma`), persisted to disk | Zero-ops embedded vector DB — no external service dependency for a project this size; persists to `./data/chroma-db` so ingestion survives restarts. |
-| **Embeddings** | `sentence-transformers` / HuggingFace BGE (`all-MiniLM-L6-v2`) by default, OpenAI as opt-in | Local embeddings avoid a second paid API dependency and external network call on every retrieval; `EMBEDDING_PROVIDER=openai` is a config flip for teams that want higher-quality embeddings. |
-| **Keyword retrieval** | `rank-bm25` + custom `BM25Retriever` | Lexical fallback for exact-term queries (policy numbers, specific clause names) that dense embeddings under-rank; combined via `EnsembleRetriever`. |
-| **Hybrid fusion** | `EnsembleRetriever` (LangChain), weights `[0.6, 0.4]` | Reciprocal-rank-style fusion of semantic + keyword results without hand-rolling RRF; weighting favors semantic recall while keeping lexical precision as a corrective. |
-| **Doc parsing** | `unstructured[pdf,docx]` via `UnstructuredFileLoader` | Handles messy real-world policy PDFs/DOCX (tables, headers) better than naive text extraction. |
-| **Chunking** | `RecursiveCharacterTextSplitter` | Splits on paragraph → line → sentence → word boundaries in priority order, preserving semantic units better than fixed-width slicing. |
-| **Structured LLM outputs** | `pydantic` + `.with_structured_output()` | Router intent, scope decision, and judge scores are all typed Pydantic models — guarantees parseable output instead of prompting for JSON and hand-parsing. |
-| **Multi-turn state** | LangGraph `MemorySaver` checkpointer, keyed by `thread_id = session_id` | Frustration score and escalation flag persist across turns without a hand-built session store; swappable for a Redis/Postgres checkpointer later (noted as a TODO). |
-| **Frustration detection** | Hand-written regex bank, not an LLM call | Deterministic, sub-millisecond, zero-cost per turn — appropriate for a signal that gates on every single message. An LLM classifier here would add latency and cost to every turn for a binary-ish signal that pattern-matches well. |
-| **Evaluation** | Custom LLM-judge (`judge_llm.py`) + RAGAS (`ragas_eval.py`) | Two independent evaluation paths: a fast structured-output judge for faithfulness/relevance/completeness/hallucination, and RAGAS for standardized retrieval metrics (faithfulness, answer relevance, context precision) — useful for regression-testing retrieval quality independent of the judge's own prompt. |
-| **Observability** | LangSmith (optional, `langsmith_enabled` flag) | Opt-in tracing of node execution, LLM calls, and retrieval latency without changing code paths when disabled. |
-| **Tool exposure** | MCP server (`mcp` SDK, stdio transport) | Lets any MCP-compatible client (Claude Desktop, other agents) call `search_policies` / `list_policy_documents` directly against the retriever, bypassing the guardrail/frustration pipeline — a deliberate scope reduction, see §6. |
-| **Package/dep management** | `pyproject.toml` with optional-dependency groups (`api`, `mcp`, `eval`, `openai`, `dev`) | Consumers only install what they need (e.g. a pure ingestion CLI doesn't need `fastapi`). |
-| **Linting/typing** | `ruff` (E, F, I, UP rules) + `mypy --strict` | Fast lint + import-sort in one tool; strict typing on a codebase that leans heavily on `TypedDict` state makes key-typos (see §7) easier to catch — though evidently not all are caught yet. |
+| **Orchestration** | LangGraph `StateGraph` | Explicit, inspectable state machine instead of an implicit agent loop — routing/escalation logic is testable as plain functions independent of any LLM call. |
+| **LLM** | Claude via `langchain-anthropic` | One provider client reused for generation, routing, scope detection, and judging — swappable per-node by model name. |
+| **Web framework** | FastAPI + Uvicorn | Native async matches LangGraph's async invocation path; free OpenAPI docs at `/docs`; first-class SSE for token streaming. |
+| **Vector store** | Chroma, singleton + threading lock | Zero-ops embedded vector DB; singleton avoids N embedding-model loads and SQLite "database is locked" errors under concurrent requests. |
+| **Embeddings** | HuggingFace BGE (`all-MiniLM-L6-v2`) locally, OpenAI opt-in | Local by default = no second paid API + no extra network hop on every retrieval. |
+| **Keyword retrieval** | `rank-bm25` + custom `BM25Retriever` | Lexical fallback for exact-term queries dense embeddings under-rank. |
+| **Hybrid fusion** | `EnsembleRetriever`, weights `[0.6, 0.4]` | RRF-style fusion of semantic + keyword without hand-rolling it. |
+| **Doc parsing** | `unstructured[pdf,docx]` | Handles messy real-world PDFs/DOCX (tables, headers) better than naive text extraction. |
+| **Chunking** | `RecursiveCharacterTextSplitter` | Splits on paragraph → line → sentence → word, preserving semantic units. |
+| **Structured LLM output** | Pydantic + `.with_structured_output()` | Router intent, scope decision, judge scores are typed models — no hand-parsed JSON. |
+| **Multi-turn state** | `SqliteSaver` checkpointer (fallback `MemorySaver`), keyed by `thread_id=session_id` | Frustration score + escalation flag survive a server restart now. |
+| **Async task queue** | Celery + Redis | Crash-safe, retryable, horizontally-scalable ingestion — see the [ingestion diagram](#2-async-ingestion-via-celery--redis). |
+| **CLI** | Typer + Rich | `ingest --file/-f` or `--dir/-d`, with `--dry-run` and a pretty summary table — nicer than raw `argparse` prints. |
+| **Frustration detection** | Hand-written weighted regex bank, no LLM call | Deterministic, sub-millisecond, zero-cost per turn — this signal gates on *every single message*, so an LLM call here would be wasteful. |
+| **Evaluation** | Custom LLM-judge + RAGAS | Two independent eval paths for faithfulness/relevance/completeness/hallucination and standardized retrieval metrics. |
+| **Observability** | LangSmith (opt-in) + structured JSON logs + request IDs | Tracing when you want it, greppable/aggregatable logs always. |
+| **Rate limiting** | In-memory sliding-window middleware | Simple per-process throttle; documented TODO to move to Redis `INCR` so multi-worker deployments share one limit. |
+| **Tool exposure** | MCP server (stdio) | Any MCP client (Claude Desktop, etc.) can call `search_policies`/`list_policy_documents` directly — deliberately narrower than the guarded HTTP path. |
+| **Packaging** | `pyproject.toml` optional-dependency groups (`api`, `mcp`, `eval`, `openai`, `dev`) | Install only what you need. |
+| **Linting/typing** | `ruff` + `mypy --strict` | Fast lint/import-sort + strict typing on a `TypedDict`-heavy state model. |
 
 ---
 
-## 5. Core Design Decisions
+## 💡 Core Design Decisions
 
-### 5.1 Guardrails as graph nodes, not middleware
-`input_guard` and `output_guard` are ordinary LangGraph nodes, not FastAPI middleware. This means:
-- Guardrail checks apply identically whether the agent is invoked via HTTP, the MCP tool path (for the sub-parts it does traverse), or direct Python call.
-- Guardrail state (flags, blocked reason) flows through the same `AgentState` as everything else, so a blocked turn still produces a well-formed response object instead of an HTTP-layer short-circuit.
-- Trade-off: guardrail logic can't reject a request before any graph execution cost is paid — there's always at least one node invocation, even for a blocked query.
+### 🛡️ Guardrails live *in* the graph, not in HTTP middleware
+`input_guard` and `output_guard` are LangGraph nodes, so the same checks apply whether you hit the agent over HTTP, embed it directly in Python, or (partially) via MCP. Trade-off: a blocked request still costs one node execution — there's no free "reject before graph starts" path.
 
-### 5.2 Frustration as a cumulative, weighted score
-Rather than a single-turn "is this message angry?" classifier, `frustration_detector.py` treats frustration as **session-level state that only escalates within a turn, never regresses** (`update_frustration_score` floors at the current score, never subtracts). Signals are weighted by severity:
+### 😤 Frustration is cumulative and one-directional
+`update_frustration_score()` never subtracts — once you're annoyed, the score only climbs within the session (see the [state machine](#3-frustration-score-state-machine)). Crossing `ESCALATION_THRESHOLD = 0.80` routes to `human_escalation_node` **regardless of what the router would've decided** — a deterministic, regex-computed circuit breaker sitting on top of an otherwise LLM-driven pipeline.
 
-| Signal class | Weight | Example |
-|---|---|---|
-| Explicit human/agent request | 0.40 | "connect me to a human" |
-| Strong negative emotion | 0.30–0.35 | "this is ridiculous", "I give up" |
-| Confusion / repetition | 0.15 | "you don't understand", "same answer" |
-| Short negative one-word | 0.10 | "wrong", "nope" |
+### 🧭 Structured routing that fails open
+`router_node` classifies intent via `.with_structured_output(RouterDecision)`. If the router call throws, the code **defaults to `"policy"`** rather than failing the whole request — availability over strict scope enforcement, by explicit design.
 
-Crossing `ESCALATION_THRESHOLD = 0.80` (cumulative, across the session, via the `MemorySaver` checkpointer) routes to `human_escalation_node` regardless of what the router would have decided. This is a **deterministic circuit breaker** layered on top of an otherwise LLM-driven pipeline — the score is regex-computed so it's auditable and doesn't depend on LLM availability.
+### 🥈 Hybrid retrieval is opt-in
+`build_retriever()` only builds the BM25 + semantic ensemble when `use_bm25=True` **and** a corpus is supplied. It's there and ready, but wiring a corpus into `retrieve_node` at call time is what flips it on.
 
-### 5.3 Structured routing instead of free-text intent parsing
-`router_node` uses `ChatAnthropic(...).with_structured_output(RouterDecision)` where `RouterDecision` is a two-field Pydantic model (`intent: Literal["policy","out_of_scope"]`, `reasoning: str`). On any router exception, the code **fails open to `"policy"`** rather than failing the request — the inline comment explicitly frames this as a "keep pipeline alive" decision. This favors availability over strict scope enforcement.
+### 🧵 Output grounding via cheap lexical overlap, not embeddings
+`_is_grounded()` tokenizes retrieved context + generated response (words >4 chars), and flags low grounding if a >20-word response shares <3 words with the retrieved vocabulary. Deliberately lightweight — a full embedding-similarity check would cost an extra model call on *every* response.
 
-### 5.4 Hybrid retrieval is opt-in, not default
-`build_retriever()` only constructs the BM25 + semantic ensemble when **both** `settings.use_bm25` is `True` **and** an in-memory `corpus` is supplied by the caller. In the current wiring, `retrieve_node` in `policy_agent.py` calls `build_retriever()` with no corpus argument, so **the hybrid path is effectively dead code in the running graph today** — it falls through to pure semantic retrieval every time. This is worth flagging explicitly (see §7) since it's a real gap between the advertised "hybrid retriever" design and current runtime behavior.
+### 📦 Celery + Redis over fire-and-forget background tasks
+Documented directly in `ingest.py`'s docstring — the switch bought crash recovery, real status polling, automatic retry with backoff, horizontal scaling, and process isolation (the old approach shared the API's event loop; the new one runs in a totally separate worker process).
 
-### 5.5 Output grounding via lexical overlap heuristic, not embeddings
-`_is_grounded()` in `output_guard.py` is a cheap heuristic: it lowercases and tokenizes both the retrieved context and the generated response (words >4 chars only), and flags `OUTPUT_LOW_GROUND_SCORE` if the response is longer than 20 significant words but shares fewer than 3 with the retrieved vocabulary. This is intentionally lightweight — a full embedding-similarity or NLI-based grounding check would cost an extra model call on every response. The trade-off is a heuristic that can be fooled by paraphrase (semantically grounded but lexically divergent answers) and won't catch subtle factual drift within otherwise-overlapping vocabulary.
+### 🔒 Chroma as a locked singleton
+`get_vectorstore()` uses a double-checked lock so 20 concurrent requests share one Chroma client instead of spinning up 20 (20x the embedding-model RAM, 20 SQLite file handles, guaranteed "database is locked" errors).
 
-### 5.6 Fire-and-forget ingestion with `BackgroundTasks`
-`/api/v1/ingest` returns `202 Accepted` immediately and runs loading → chunking → embedding → storing in a FastAPI `BackgroundTasks` callback, moved off the event loop via `asyncio.to_thread` for the CPU/IO-bound steps. The code comments explicitly note this is a stopgap ("will implement celery/arq + redis for task queue management") — acceptable for single-instance deployments but with no retry, progress-reporting, or multi-worker coordination.
+### 🚦 Per-process semaphore + timeout around every LLM call
+`/ask` acquires an `asyncio.Semaphore(max_concurrent_llm_calls)` before invoking the graph, wrapped in `asyncio.wait_for(agent_timeout_seconds)`. The semaphore is explicitly **per-worker-process** (documented in `dependencies.py`) — total fleet concurrency is `max_concurrent_llm_calls × num_workers`, so the per-worker value should be tuned against your actual Anthropic rate limit.
 
-### 5.7 Two-tier health checking (`/health` vs `/status`)
-`/health` is a pure liveness probe (always `200 ok` if the process can respond at all) intended to gate **pod restarts** in Kubernetes. `/status` is a readiness probe that actually opens the Chroma collection and counts documents, returning `degraded` (not a 5xx) if the vector store is unreachable — intended to gate **traffic routing**, not restarts, since the service can still answer from LLM parametric knowledge (with zero retrieval grounding) even if Chroma is down.
+### 🩺 Two-tier health checking
+`/health` is a pure liveness probe for pod-restart decisions. `/status` actually opens the Chroma collection and reports `degraded` (not a 5xx) if it can't — because the service can still limp along answering from parametric knowledge even with retrieval down.
 
-### 5.8 MCP server as a narrower surface than the HTTP API
-`mcp_server.py` exposes only `search_policies` (raw retriever call) and `list_policy_documents` (distinct `policy_name` values from Chroma metadata) — it calls `build_retriever()` directly and **does not** go through `master_agent`, so MCP clients get raw retrieval, not guardrail-checked, frustration-tracked, routed answers. This is a deliberate scope boundary: MCP tools are meant to hand context to an external LLM's own reasoning loop, not to re-expose the full guarded conversational agent.
-
-### 5.9 Factory pattern for app construction
-`create_app()` centralizes lifespan (LangSmith setup/teardown logging), CORS, a request-timing middleware (method/path/status/duration — poor-man's APM without extra infra), a global exception handler that maps any uncaught exception to a generic `500` (avoiding leaking stack traces to clients), and router registration under a single `/api/v1` prefix. Keeping this in a factory function (rather than module-level `app = FastAPI()`) keeps `main.py` a thin entrypoint and makes the app instantiable for tests without importing `uvicorn`.
+### 🔌 MCP server as a narrower surface
+`mcp_server.py` calls the retriever directly, skipping guardrails and frustration tracking entirely — MCP tools are meant to hand raw context to an *external* LLM's own reasoning loop, not re-expose the fully-guarded conversational agent.
 
 ---
 
-## 6. Module Map
+## 📁 Module Map
 
 ```
 ragent/
-├── main.py                      # uvicorn entrypoint
+├── main.py                          # uvicorn entrypoint
 ├── scripts/
-│   └── ingest_data.py            # CLI entrypoint (registered as `ingest` script) — currently empty
+│   └── ingest_data.py                 # 🖥️  Typer CLI: --file/--dir, --clear, --dry-run, Rich summary table
 └── src/
     ├── agents/
-    │   ├── state.py              # AgentState TypedDict — shared schema across all graph nodes
-    │   ├── master_agent.py       # top-level StateGraph: guardrails, frustration, routing, escalation
-    │   ├── policy_agent.py       # sub-graph: transform_query -> retrieve -> generate
+    │   ├── state.py                   # AgentState TypedDict — shared schema across every graph node
+    │   ├── master_agent.py            # top-level StateGraph: guardrails, frustration, routing, escalation
+    │   ├── policy_agent.py            # sub-graph: transform_query → retrieve → generate
     │   └── __init__.py
     ├── api/
-    │   ├── app.py                 # FastAPI factory (lifespan, middleware, routers, exception handling)
-    │   ├── dependencies.py        # verify_api_key (Depends()-based auth stub)
-    │   ├── schema.py              # Pydantic request/response models
+    │   ├── app.py                      # FastAPI factory (lifespan, middleware wiring, routers)
+    │   ├── middleware.py               # 🆕 RequestID, RateLimit (sliding window), JSON log formatter
+    │   ├── dependencies.py             # verify_api_key, get_llm_semaphore, get_request_id
+    │   ├── schema.py                   # Pydantic request/response models
     │   └── routes/
-    │       ├── query.py           # POST /ask, POST /ask/stream (SSE)
-    │       ├── ingest.py          # POST /ingest (background task)
-    │       └── health.py          # GET /health (liveness), GET /status (readiness)
+    │       ├── query.py                # POST /ask, POST /ask/stream (SSE) — semaphore + timeout wrapped
+    │       ├── ingest.py                # POST /ingest (Celery), GET /ingest/status/{task_id}
+    │       ├── ingest_bgtask.py         # 🗄️ archived: the old BackgroundTasks version, kept for reference
+    │       └── health.py                # GET /health (liveness), GET /status (readiness)
+    ├── worker/
+    │   ├── celery_app.py                # 🆕 Celery config: JSON serialization, late acks, single-prefetch
+    │   └── tasks.py                     # 🆕 ingest_documents task — retry w/ backoff, progress reporting
     ├── guardrails/
-    │   ├── input_guard.py         # PII (CC/SSN) + prompt-injection regex filter
-    │   ├── output_guard.py        # PII redaction + lexical grounding heuristic
-    │   ├── frustration_detector.py# weighted regex signal bank + cumulative score
-    │   └── scope_detector.py      # standalone LLM in/out-of-scope classifier (pre-graph filtering use case)
+    │   ├── input_guard.py                # PII (CC/SSN) + prompt-injection regex filter
+    │   ├── output_guard.py               # PII redaction + lexical grounding heuristic
+    │   ├── frustration_detector.py       # weighted regex signal bank + cumulative score
+    │   └── scope_detector.py             # standalone LLM in/out-of-scope classifier
     ├── rag/
-    │   ├── document_processor.py  # UnstructuredFileLoader + RecursiveCharacterTextSplitter + metadata enrichment
-    │   ├── embeddings.py           # local (HF BGE) or OpenAI embedding provider, lru_cached
-    │   ├── vectorstore.py          # Chroma client, add_documents, base retriever factory
-    │   └── retriver.py             # BM25Retriever + EnsembleRetriever hybrid builder [sic — filename]
+    │   ├── document_processor.py         # UnstructuredFileLoader + RecursiveCharacterTextSplitter
+    │   ├── embeddings.py                  # local (HF BGE) or OpenAI embedding provider, lru_cached
+    │   ├── vectorstore.py                 # 🆕 Chroma singleton (thread-locked) + retriever factory
+    │   └── retriver.py                    # BM25Retriever + EnsembleRetriever hybrid builder
     ├── evaluation/
-    │   ├── judge_llm.py            # structured-output LLM judge: faithfulness/relevance/completeness/hallucination
-    │   └── ragas_eval.py           # RAGAS harness (faithfulness, answer relevance, context precision, [context recall])
+    │   ├── judge_llm.py                   # structured-output LLM judge: 4-dimension scoring
+    │   └── ragas_eval.py                   # RAGAS harness (faithfulness, answer relevance, context precision)
     ├── observability/
-    │   └── tracing.py              # LangSmith env-var setup, run URL builder
-    ├── mcp_server.py                # stdio MCP server: search_policies, list_policy_documents
+    │   └── tracing.py                      # LangSmith env-var setup, run URL builder
+    ├── mcp_server.py                        # stdio MCP server: search_policies, list_policy_documents
     └── config/
-        └── settings.py              # pydantic-settings, .env-backed
+        └── settings.py                      # pydantic-settings, .env-backed
 ```
 
 ---
 
+## ⚙️ Configuration Reference
 
-## 7. Configuration Reference (`src/config/settings.py`)
-
-All settings are loaded via `pydantic-settings` from environment variables / a `.env` file (case-insensitive).
+All settings load via `pydantic-settings` from environment variables / a `.env` file (case-insensitive).
 
 | Setting | Default | Notes |
 |---|---|---|
 | `anthropic_api_key` | `""` | Required for any LLM call to succeed |
 | `llm_model` | `claude-opus-4-8` | Shared across generation, routing, scope detection, judging |
-| `llm_max_tokens` | `4096` | Generation cap |
-| `llm_temperature` | `0.1` | Low temperature — favors deterministic, grounded answers over creativity |
-| `embedding_provider` | `local` | `local` (HF BGE, CPU) or `openai` |
-| `embedding_model` | `all-MiniLM-L6-v2` | Fast, small, CPU-friendly local model |
-| `chroma_presist_dir` | `./data/chroma-db` | [sic] persistence path |
-| `chroma_collection_name` | `policies` | |
-| `retriver_top_k` | `6` | [sic] top-k for retrieval |
-| `use_bm25` | `False` | See §5.4 / §7 — currently inert regardless of value |
-| `chunk_size` / `chunk_overlap` | `100` / `200` | See §7 — likely misconfigured |
-| `langsmith_api_key` / `langsmith_project` / `langsmith_tracing` | `""` / `ragent` / `False` | `langsmith_enabled` property gates on both key presence and the tracing flag |
+| `llm_max_tokens` / `llm_temperature` | `4096` / `0.1` | Low temperature favors grounded answers over creativity |
+| `embedding_provider` / `embedding_model` | `local` / `all-MiniLM-L6-v2` | `local` (HF BGE, CPU) or `openai` |
+| `chroma_presist_dir` / `chroma_collection_name` | `./data/chroma-db` / `policies` | Persistent vector store location |
+| `retriver_top_k` | `6` | Top-k for retrieval |
+| `use_bm25` | `False` | Enables hybrid retrieval once a corpus is wired in |
+| `chunk_size` / `chunk_overlap` | `100` / `200` | Splitter config |
+| `langsmith_api_key` / `langsmith_project` / `langsmith_tracing` | — / `ragent` / `False` | `langsmith_enabled` gates on both key + flag |
+| `redis_url` | `redis://localhost:6317` | 🆕 Celery broker + result backend |
+| `max_concurrent_llm_calls` | `10` | 🆕 Per-worker semaphore size |
+| `agent_timeout_seconds` | `60` | 🆕 Hard timeout around `master_agent.ainvoke()` |
+| `rate_limit_per_minute` | `60` | 🆕 Sliding-window limit per client IP |
+| `cors_origin` | `["*"]` | 🆕 CORS allow-list |
+| `api_secret_key` | `""` | 🆕 Bearer token for `verify_api_key` — unset = auth disabled |
 
 ---
 
-## 9. Running Locally
+<div align="center">
 
-```bash
-# install core + api + mcp + eval extras
-pip install -e ".[api,mcp,eval]"
+*Built as a hands-on exploration of guardrail-first agent design — issues, PRs, and "hey this regex is wrong" comments welcome.* ✨
 
-# configure
-cp .env.example .env   # set ANTHROPIC_API_KEY at minimum
-
-# start the API (auto-reload dev mode, per main.py)
-python main.py
-# or, for multi-worker production-style run:
-uvicorn main:app --host 0.0.0.0 --port 8000 --workers 4
-
-# ingest policy documents (PDF/DOCX) from a directory
-curl -X POST http://localhost:8000/api/v1/ingest \
-  -H "Content-Type: application/json" \
-  -d '{"directory": "data/policies", "clear": false}'
-
-# ask a question
-curl -X POST http://localhost:8000/api/v1/ask \
-  -H "Content-Type: application/json" \
-  -d '{"query": "What is the maximum reimbursable amount for business travel?", "include_sources": true}'
-```
-
-OpenAPI docs are served at `/docs` once the app is running.
+</div>
