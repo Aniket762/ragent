@@ -40,6 +40,18 @@ class Settings(BaseSettings):
     # tasks
     redis_url: str = "redis://localhost:6317"
 
+    # concurrency
+    max_concurrent_llm_calls:int = 10
+    agent_timeout_seconds:int = 60 # if LLM hangs, p99 is 30s
+    rate_limit_per_minute:int = 60
+
+    #cors
+    cors_origin:list[str] = ["*"]
+
+    # api security
+    api_secret_key:str=""
+
+
     @property
     def langsmith_enabled(self) -> bool:
         return bool(self.langsmith_api_key) and self.langsmith_tracing
