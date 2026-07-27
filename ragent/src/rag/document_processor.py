@@ -23,7 +23,7 @@ def load_and_split(file_path: str| Path) -> list[Document]:
     path = Path(file_path)
     if path.suffix.lower() not in _SUPPORTED_EXTENSIONS:
         raise ValueError(f"Unsupported file type: {path.suffix}")
-    
+
     loader = UnstructuredFileLoader(str(path),mode="elements")
     raw_docs = loader.load()
 
