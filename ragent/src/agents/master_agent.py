@@ -1,6 +1,9 @@
+import logging
+import sqlite3
 import uuid as _uuid
 from functools import lru_cache
 from typing import Literal
+from pathlib import Path
 
 from langchain_anthropic import ChatAnthropic
 from pydantic import BaseModel
@@ -101,7 +104,10 @@ def _route_after_router(state:AgentState)-> str:
 
 # graph assembly
 def _build_master_agent():
-    # TODO: Memory-Saver file-based or redis based checkpointer, if server restarts checkpoints are lost
+    # memory saver: sqliteserver with fallback to memorysaver - single server, persists accross restarts
+    # TODO: async redis saver - handles multiple worker/vm, fully shared
+    checkpointer = _build_checkpointer()
+
     graph:StateGraph = StateGraph(AgentState)
 
     #nodes
@@ -153,6 +159,19 @@ def _build_master_agent():
 
 
 master_agent = _build_master_agent()
+
+# TODO: Redis for multi-worker
+def _build_checkpointer():
+    try:
+        from langgraph.checkpoint.sqlite import SqliteSaver
+
+        session_db = Path(settings.chroma_presist_dir).parent/"sessions.db"
+        session_db.parent.mkdir(parents=True, exist_ok=True)
+
+        conn = sqlite3.connect(str(session_db),check_same_thread=False)
+        return SqliteSaver(conn)
+    except Exception as exec:
+        return MemorySaver()
 
 def _build_turn_input(query:str, session_id: str) -> dict:
     # frustration score, escalation requested presisted by checkpointer
