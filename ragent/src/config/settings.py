@@ -37,6 +37,9 @@ class Settings(BaseSettings):
     langsmith_project:str = "ragent"
     langsmith_tracing:bool = False
 
+    # tasks
+    redis_url: str = "redis://localhost:6317"
+
     @property
     def langsmith_enabled(self) -> bool:
         return bool(self.langsmith_api_key) and self.langsmith_tracing
