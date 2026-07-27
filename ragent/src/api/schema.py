@@ -86,6 +86,15 @@ class IngestRequest(BaseModel):
 class IngestResponse(BaseModel):
     status: str
     message: str 
+    task_id: str # celery task uuid - use this to poll /ingest/status/{task_id}
+
+class IngestStatusResponse(BaseModel):
+    task_id: str 
+    state:str # PENDING | STARTED | PROGRESS | SUCCESS | FAILURE | RETRY
+    pct: int | None = None # progress percentage 0-100 
+    step: str | None = None  # "loading" | "embedding" | "done"
+    chunks_written: int | None = None #final chunk count available on success
+    error: str | None = None 
 
 class HealthResponse(BaseModel):
     status:str = "ok"
