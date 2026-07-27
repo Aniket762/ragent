@@ -13,6 +13,11 @@ celery worker process: (consumer)
 - writes result back to redis with celery jobId
 
 redis is used as broker(lpush/brpop) + db for status store for the celery tasks
+
+key consideration for the config:
+1. task_acks_late = True : msg stays in Redis until the task finishes, so worker crash causes redelivery not silent data loss
+2. worker_prefetch_multiplier=1: each worker holds exactly one task at a time (critical for long CPU-bound embedding task)
+3. JSON serialization: never pickle (pickle can execute arbitary code on deserialization)
 '''
 
 from celery import Celery

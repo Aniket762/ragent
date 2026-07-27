@@ -1,3 +1,7 @@
+'''
+autoretry_for = (IOError,OSError,ConnectionError): with exp backoff, transient errors retry automatically, permanent errors (missing dir) fail immediately
+self.update_state called at each phase so the status endpoint returns real progress instead of just "running"
+'''
 import logging 
 from pathlib import Path
 
